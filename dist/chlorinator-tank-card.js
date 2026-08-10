@@ -3,13 +3,19 @@ class ChlorinatorTankCard extends HTMLElement {
     if (!config) throw new Error("Configuration manquante");
     this.config = {
       name: "Bidon de chlore",
+      icon: "mdi:flask",
       tank_capacity: 20,
       low_threshold: 25,
       critical_threshold: 10,
       empty_threshold: 5,
+      // Entité optionnelle (ex: input_text ou input_datetime) pour mémoriser
+      // la date de changement du bidon entre deux rechargements de la page.
+      refill_date_entity: null,
       ...config
     };
     if (!this.shadowRoot) this.attachShadow({mode: "open"});
+    // Date locale de secours si aucune refill_date_entity n'est configurée
+    this._localRefillDate = this._localRefillDate || null;
     this.render();
   }
 
@@ -25,6 +31,30 @@ class ChlorinatorTankCard extends HTMLElement {
     if (!s || ["unknown", "unavailable"].includes(s.state)) return null;
     const n = Number.parseFloat(s.state);
     return Number.isFinite(n) ? n : null;
+  }
+
+  _formatDate(d) {
+    if (!d) return null;
+    const date = d instanceof Date ? d : new Date(d);
+    if (Number.isNaN(date.getTime())) return null;
+    return date.toLocaleDateString("fr-FR", { day: "2-digit", month: "2-digit", year: "numeric" });
+  }
+
+  _currentRefillDateLabel() {
+    const c = this.config;
+    // Priorité à l'entité HA si configurée (persiste entre rechargements)
+    if (c.refill_date_entity) {
+      const s = this._hass?.states?.[c.refill_date_entity];
+      if (s && !["unknown", "unavailable", ""].includes(s.state)) {
+        const label = this._formatDate(s.state);
+        if (label) return label;
+      }
+    }
+    // Sinon, valeur locale mémorisée depuis le dernier clic dans cette session
+    if (this._localRefillDate) {
+      return this._formatDate(this._localRefillDate);
+    }
+    return null;
   }
 
   render() {
@@ -52,6 +82,11 @@ class ChlorinatorTankCard extends HTMLElement {
     const fmt = v => v === null ? "—" : `${v.toFixed(2)} L`;
     const pct = percent === null ? "—" : `${percent.toFixed(1)} %`;
 
+    const refillDateLabel = this._currentRefillDateLabel();
+    const buttonLabel = refillDateLabel
+      ? `🧴 Bidon changé le ${refillDateLabel}`
+      : `🧴 Bidon changé le`;
+
     this.shadowRoot.innerHTML = `
       <style>
         :host{display:block}
@@ -78,7 +113,7 @@ class ChlorinatorTankCard extends HTMLElement {
           color:var(--text-primary-color,#fff);font:inherit;font-weight:600;cursor:pointer}
       </style>
       <ha-card>
-        <div class="header"><div class="title">${c.name}</div><ha-icon icon="mdi:flask"></ha-icon></div>
+        <div class="header"><div class="title">${c.name}</div><ha-icon icon="${c.icon}"></ha-icon></div>
         <div class="content">
           <div class="tank-wrap"><div class="neck"></div><div class="tank ${level}">
             <div class="liquid"></div>
@@ -90,16 +125,58 @@ class ChlorinatorTankCard extends HTMLElement {
             <div class="row"><span>Hier</span><span>${fmt(yesterday)}</span></div>
           </div>
         </div>
-        <button id="refill">🧴 Bidon rempli</button>
+        <button id="refill">${buttonLabel}</button>
       </ha-card>`;
 
     this.shadowRoot.querySelector("#refill")?.addEventListener("click", () => {
       if (total === null || !c.refill_baseline_entity) return;
+      const now = new Date();
+
       this._hass.callService("input_number", "set_value", {
         entity_id: c.refill_baseline_entity,
         value: total
       });
+
+      if (c.refill_date_entity) {
+        // Adapte le service selon le type d'entité utilisé pour stocker la date
+        const domain = c.refill_date_entity.split(".")[0];
+        if (domain === "input_datetime") {
+          this._hass.callService("input_datetime", "set_datetime", {
+            entity_id: c.refill_date_entity,
+            date: now.toISOString().slice(0, 10)
+          });
+        } else {
+          // input_text ou autre entité acceptant set_value
+          this._hass.callService("input_text", "set_value", {
+            entity_id: c.refill_date_entity,
+            value: now.toISOString().slice(0, 10)
+          });
+        }
+      } else {
+        // Pas d'entité configurée : on mémorise localement (perdu au rechargement de la page)
+        this._localRefillDate = now;
+      }
+
+      this.render();
     });
+  }
+
+  static getConfigForm() {
+    return {
+      schema: [
+        { name: "name", selector: { text: {} } },
+        { name: "icon", selector: { icon: {} } },
+        { name: "tank_capacity", selector: { number: { mode: "box", unit_of_measurement: "L" } } },
+        { name: "low_threshold", selector: { number: { mode: "box", unit_of_measurement: "%" } } },
+        { name: "critical_threshold", selector: { number: { mode: "box", unit_of_measurement: "%" } } },
+        { name: "empty_threshold", selector: { number: { mode: "box", unit_of_measurement: "%" } } },
+        { name: "volume_total_entity", selector: { entity: {} } },
+        { name: "refill_baseline_entity", selector: { entity: {} } },
+        { name: "volume_today_entity", selector: { entity: {} } },
+        { name: "volume_yesterday_entity", selector: { entity: {} } },
+        { name: "refill_date_entity", selector: { entity: {} } }
+      ]
+    };
   }
 }
 
