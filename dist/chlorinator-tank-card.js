@@ -177,6 +177,8 @@ class ChlorinatorTankCard extends HTMLElement {
         console.debug("chlorinator-tank-card: résultat stats abandonné (requête obsolète)");
         return;
       }
+
+      const rows = (stats && stats[entity]) || [];
       const sorted = rows
         .filter(r => Number.isFinite(r.max))
         .sort((a, b) => new Date(a.start) - new Date(b.start));
