@@ -131,40 +131,56 @@ class ChlorinatorTankCard extends HTMLElement {
     this._historyFetchedAt = now;
 
     const days = Number(c.rolling_average_days) || 7;
+    // Marge de sécurité : si le tout premier point récupéré tombe en plein
+    // milieu d'un cycle (pas au début), ce cycle-là sera partiel/faussé.
+    // En allant chercher plus loin que nécessaire, ce cycle tronqué se
+    // retrouve en tête de liste et n'est jamais retenu par le slice(-days) final.
+    const lookbackDays = days + 3;
 
     try {
       const start = new Date();
-      start.setDate(start.getDate() - (days + 1));
+      start.setDate(start.getDate() - lookbackDays);
       const url = `history/period/${start.toISOString()}?filter_entity_id=${entity}`;
       const result = await this._hass.callApi("GET", url);
       const entries = (result && result[0]) || [];
 
-      const maxByDay = {};
-      for (const entry of entries) {
-        const v = Number.parseFloat(entry.state);
-        if (!Number.isFinite(v)) continue;
-        const ts = entry.last_changed || entry.last_updated;
-        if (!ts) continue;
-        const key = this._dayKey(new Date(ts));
-        if (maxByDay[key] === undefined || v > maxByDay[key]) maxByDay[key] = v;
+      const points = entries
+        .map(e => ({
+          v: Number.parseFloat(e.state),
+          t: new Date(e.last_changed || e.last_updated).getTime()
+        }))
+        .filter(p => Number.isFinite(p.v) && Number.isFinite(p.t))
+        .sort((a, b) => a.t - b.t);
+
+      // Ce capteur grimpe pendant la journée puis retombe brutalement à chaque
+      // remise à zéro (voir le graphique en dents de scie). On détecte donc
+      // directement chaque cycle en repérant ces chutes, plutôt que de
+      // regrouper par date calendaire — ce qui colle exactement à la forme
+      // réelle du signal, sans dépendre de l'heure exacte du reset ni du
+      // fuseau horaire.
+      const completedCycles = [];
+      let cyclePeak = null;
+      for (const p of points) {
+        if (cyclePeak === null) {
+          cyclePeak = p.v;
+          continue;
+        }
+        if (p.v < cyclePeak * 0.5) {
+          // Chute nette de valeur = reset détecté = fin d'un cycle complet
+          if (cyclePeak > 0) completedCycles.push(cyclePeak);
+          cyclePeak = p.v;
+        } else if (p.v > cyclePeak) {
+          cyclePeak = p.v;
+        }
       }
+      // Le cycle en cours (cyclePeak courant, pas encore retombé) n'est PAS
+      // ajouté à completedCycles : c'est la journée non terminée.
 
-      // On exclut systématiquement le jour calendaire le plus RÉCENT trouvé dans
-      // l'historique (que ce soit "aujourd'hui" ou non) : c'est toujours ce jour-là
-      // qui est en cours / potentiellement incomplet, quel que soit le fuseau
-      // horaire du serveur. Comparer à un "todayKey" calculé côté navigateur
-      // pouvait échouer selon le décalage horaire et laisser passer un jour
-      // non terminé dans la moyenne.
-      const sortedKeys = Object.keys(maxByDay).sort((a, b) => (a < b ? 1 : -1)); // plus récent en premier
-      const completedDays = sortedKeys
-        .slice(1) // on retire le jour le plus récent (en cours)
-        .filter(key => maxByDay[key] > 0)
-        .slice(0, days)
-        .map(key => maxByDay[key]);
+      const usedCycles = completedCycles.slice(-days);
 
-      if (completedDays.length) {
-        this._rollingAvg = completedDays.reduce((a, b) => a + b, 0) / completedDays.length;
-        this._rollingAvgDays = completedDays.length;
+      if (usedCycles.length) {
+        this._rollingAvg = usedCycles.reduce((a, b) => a + b, 0) / usedCycles.length;
+        this._rollingAvgDays = usedCycles.length;
       } else {
         this._rollingAvg = null;
         this._rollingAvgDays = 0;
