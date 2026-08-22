@@ -173,9 +173,10 @@ class ChlorinatorTankCard extends HTMLElement {
         types: ["max"]
       });
 
-      if (seq !== this._fetchSeq) return;
-
-      const rows = (stats && stats[entity]) || [];
+      if (seq !== this._fetchSeq) {
+        console.debug("chlorinator-tank-card: résultat stats abandonné (requête obsolète)");
+        return;
+      }
       const sorted = rows
         .filter(r => Number.isFinite(r.max))
         .sort((a, b) => new Date(a.start) - new Date(b.start));
@@ -188,7 +189,10 @@ class ChlorinatorTankCard extends HTMLElement {
         usedValues
       );
     } catch (err) {
-      console.warn("chlorinator-tank-card: statistiques indisponibles, repli sur l'historique brut", err);
+      console.warn(
+        "chlorinator-tank-card: statistiques indisponibles, repli sur l'historique brut —",
+        err?.message || err?.code || JSON.stringify(err) || err
+      );
     }
 
     // ---- Repli : détection de cycles sur l'historique brut ----
@@ -198,7 +202,10 @@ class ChlorinatorTankCard extends HTMLElement {
       try {
         const url = `history/period/${start.toISOString()}?filter_entity_id=${entity}`;
         const result = await this._hass.callApi("GET", url);
-        if (seq !== this._fetchSeq) return;
+        if (seq !== this._fetchSeq) {
+          console.debug("chlorinator-tank-card: résultat historique brut abandonné (requête obsolète)");
+          return;
+        }
 
         const entries = (result && result[0]) || [];
         const points = entries
@@ -238,7 +245,10 @@ class ChlorinatorTankCard extends HTMLElement {
       }
     }
 
-    if (seq !== this._fetchSeq) return;
+    if (seq !== this._fetchSeq) {
+      console.debug("chlorinator-tank-card: calcul abandonné (une requête plus récente a été lancée entre-temps)");
+      return;
+    }
 
     if (usedValues.length) {
       this._rollingAvg = usedValues.reduce((a, b) => a + b, 0) / usedValues.length;
@@ -247,6 +257,10 @@ class ChlorinatorTankCard extends HTMLElement {
       this._rollingAvg = null;
       this._rollingAvgDays = 0;
     }
+
+    console.debug(
+      `chlorinator-tank-card: résultat final → moyenne=${this._rollingAvg}, jours=${this._rollingAvgDays}`
+    );
 
     this.render();
   }
