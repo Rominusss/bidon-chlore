@@ -71,6 +71,18 @@ class ChlorinatorTankCard extends HTMLElement {
     this._rollingAvg = this._rollingAvg ?? null;
     this._rollingAvgDays = this._rollingAvgDays ?? 0;
     this._historyFetchedAt = this._historyFetchedAt ?? 0;
+
+    // Si l'entité source ou le nombre de jours de moyenne change, on invalide
+    // le cache pour forcer un nouveau calcul immédiat au lieu d'attendre
+    // jusqu'à 1h (throttle) avec une ancienne valeur devenue incohérente.
+    const fetchKey = `${this.config.volume_today_entity}|${this.config.rolling_average_days}`;
+    if (this._fetchKey !== fetchKey) {
+      this._fetchKey = fetchKey;
+      this._historyFetchedAt = 0;
+      this._rollingAvg = null;
+      this._rollingAvgDays = 0;
+    }
+
     this.render();
   }
 
