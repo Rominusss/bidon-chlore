@@ -142,63 +142,110 @@ class ChlorinatorTankCard extends HTMLElement {
     if (this._historyFetchedAt && now - this._historyFetchedAt < 3600000) return;
     this._historyFetchedAt = now;
 
+    // Numéro de séquence : si un calcul plus récent est lancé avant que
+    // celui-ci ne se termine (ex: plusieurs changements de config rapprochés
+    // dans l'éditeur), ce numéro permet d'ignorer un résultat devenu obsolète
+    // au lieu de l'appliquer par-dessus un résultat plus frais.
+    this._fetchSeq = (this._fetchSeq || 0) + 1;
+    const seq = this._fetchSeq;
+
     const days = Number(c.rolling_average_days) || 7;
-    // Marge de sécurité : si le tout premier point récupéré tombe en plein
-    // milieu d'un cycle (pas au début), ce cycle-là sera partiel/faussé.
-    // En allant chercher plus loin que nécessaire, ce cycle tronqué se
-    // retrouve en tête de liste et n'est jamais retenu par le slice(-days) final.
     const lookbackDays = days + 3;
+    const start = new Date();
+    start.setDate(start.getDate() - lookbackDays);
 
+    let usedValues = [];
+
+    // ---- Méthode principale : statistiques long terme ----
+    // L'historique BRUT (history/period) est purgé par Home Assistant au bout
+    // de quelques jours (recorder.purge_keep_days, 10 par défaut, parfois
+    // moins). Les statistiques long terme, elles, sont conservées bien plus
+    // longtemps (c'est ce que ta page "Historique" utilise automatiquement
+    // pour afficher un mois complet). On les utilise donc en priorité : elles
+    // donnent directement le maximum journalier, sans avoir à deviner les
+    // cycles à partir des relevés bruts.
     try {
-      const start = new Date();
-      start.setDate(start.getDate() - lookbackDays);
-      const url = `history/period/${start.toISOString()}?filter_entity_id=${entity}`;
-      const result = await this._hass.callApi("GET", url);
-      const entries = (result && result[0]) || [];
+      const stats = await this._hass.callWS({
+        type: "history/statistics_during_period",
+        start_time: start.toISOString(),
+        statistic_ids: [entity],
+        period: "day",
+        types: ["max"]
+      });
 
-      const points = entries
-        .map(e => ({
-          v: Number.parseFloat(e.state),
-          t: new Date(e.last_changed || e.last_updated).getTime()
-        }))
-        .filter(p => Number.isFinite(p.v) && Number.isFinite(p.t))
-        .sort((a, b) => a.t - b.t);
+      if (seq !== this._fetchSeq) return;
 
-      // Ce capteur grimpe pendant la journée puis retombe brutalement à chaque
-      // remise à zéro (voir le graphique en dents de scie). On détecte donc
-      // directement chaque cycle en repérant ces chutes, plutôt que de
-      // regrouper par date calendaire — ce qui colle exactement à la forme
-      // réelle du signal, sans dépendre de l'heure exacte du reset ni du
-      // fuseau horaire.
-      const completedCycles = [];
-      let cyclePeak = null;
-      for (const p of points) {
-        if (cyclePeak === null) {
-          cyclePeak = p.v;
-          continue;
-        }
-        if (p.v < cyclePeak * 0.5) {
-          // Chute nette de valeur = reset détecté = fin d'un cycle complet
-          if (cyclePeak > 0) completedCycles.push(cyclePeak);
-          cyclePeak = p.v;
-        } else if (p.v > cyclePeak) {
-          cyclePeak = p.v;
-        }
-      }
-      // Le cycle en cours (cyclePeak courant, pas encore retombé) n'est PAS
-      // ajouté à completedCycles : c'est la journée non terminée.
+      const rows = (stats && stats[entity]) || [];
+      const sorted = rows
+        .filter(r => Number.isFinite(r.max))
+        .sort((a, b) => new Date(a.start) - new Date(b.start));
 
-      const usedCycles = completedCycles.slice(-days);
+      // On exclut le dernier point (jour en cours, potentiellement incomplet)
+      usedValues = sorted.slice(0, -1).slice(-days).map(r => r.max);
 
-      if (usedCycles.length) {
-        this._rollingAvg = usedCycles.reduce((a, b) => a + b, 0) / usedCycles.length;
-        this._rollingAvgDays = usedCycles.length;
-      } else {
-        this._rollingAvg = null;
-        this._rollingAvgDays = 0;
-      }
+      console.debug(
+        `chlorinator-tank-card: statistiques → ${rows.length} jour(s) reçu(s), ${usedValues.length} retenu(s) pour la moyenne`,
+        usedValues
+      );
     } catch (err) {
-      console.warn("chlorinator-tank-card: échec de récupération de l'historique", err);
+      console.warn("chlorinator-tank-card: statistiques indisponibles, repli sur l'historique brut", err);
+    }
+
+    // ---- Repli : détection de cycles sur l'historique brut ----
+    // Utilisé si l'entité n'a pas de statistiques long terme activées, ou si
+    // l'appel ci-dessus a échoué.
+    if (!usedValues.length) {
+      try {
+        const url = `history/period/${start.toISOString()}?filter_entity_id=${entity}`;
+        const result = await this._hass.callApi("GET", url);
+        if (seq !== this._fetchSeq) return;
+
+        const entries = (result && result[0]) || [];
+        const points = entries
+          .map(e => ({
+            v: Number.parseFloat(e.state),
+            t: new Date(e.last_changed || e.last_updated).getTime()
+          }))
+          .filter(p => Number.isFinite(p.v) && Number.isFinite(p.t))
+          .sort((a, b) => a.t - b.t);
+
+        // Ce capteur grimpe pendant la journée puis retombe brutalement à
+        // chaque remise à zéro : on détecte directement chaque cycle en
+        // repérant ces chutes.
+        const completedCycles = [];
+        let cyclePeak = null;
+        for (const p of points) {
+          if (cyclePeak === null) {
+            cyclePeak = p.v;
+            continue;
+          }
+          if (p.v < cyclePeak * 0.5) {
+            if (cyclePeak > 0) completedCycles.push(cyclePeak);
+            cyclePeak = p.v;
+          } else if (p.v > cyclePeak) {
+            cyclePeak = p.v;
+          }
+        }
+
+        usedValues = completedCycles.slice(-days);
+
+        console.debug(
+          `chlorinator-tank-card: historique brut → ${points.length} point(s) reçu(s), ${usedValues.length} cycle(s) retenu(s) pour la moyenne`,
+          usedValues
+        );
+      } catch (err) {
+        console.warn("chlorinator-tank-card: échec de récupération de l'historique brut", err);
+      }
+    }
+
+    if (seq !== this._fetchSeq) return;
+
+    if (usedValues.length) {
+      this._rollingAvg = usedValues.reduce((a, b) => a + b, 0) / usedValues.length;
+      this._rollingAvgDays = usedValues.length;
+    } else {
+      this._rollingAvg = null;
+      this._rollingAvgDays = 0;
     }
 
     this.render();
