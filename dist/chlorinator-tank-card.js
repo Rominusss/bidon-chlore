@@ -11,6 +11,14 @@ class ChlorinatorTankCard extends HTMLElement {
       refill_date_entity: null,
       rolling_average_days: 7,
 
+      // ---- Confirmation avant changement de bidon ----
+      confirm_before_refill: true,
+      confirm_message: "Confirmer le changement de bidon ?",
+
+      // ---- Graphique d'historique au clic sur la carte ----
+      show_history_on_tap: true,
+      history_entity: null, // null = utilise volume_today_entity, sinon volume_total_entity
+
       // ---- Apparence : couleurs ----
       color_card_background: null, // null = couleur par défaut du thème HA
       color_title: "var(--primary-text-color)",
@@ -38,8 +46,9 @@ class ChlorinatorTankCard extends HTMLElement {
       size_icon: 24,          // px
 
       // ---- Apparence : réservoir ----
-      tank_width: 120,   // px
-      tank_height: 190,  // px
+      tank_size: "custom", // small | medium | large | custom (utilise tank_width/tank_height)
+      tank_width: 120,   // px (utilisé si tank_size = "custom")
+      tank_height: 190,  // px (utilisé si tank_size = "custom")
       tank_position: "left", // left | right | top
 
       // ---- Visibilité des éléments ----
@@ -140,12 +149,18 @@ class ChlorinatorTankCard extends HTMLElement {
         if (maxByDay[key] === undefined || v > maxByDay[key]) maxByDay[key] = v;
       }
 
-      const todayKey = this._dayKey(new Date());
-      const completedDays = Object.entries(maxByDay)
-        .filter(([key, v]) => key !== todayKey && v > 0)
-        .sort((a, b) => (a[0] < b[0] ? 1 : -1))
+      // On exclut systématiquement le jour calendaire le plus RÉCENT trouvé dans
+      // l'historique (que ce soit "aujourd'hui" ou non) : c'est toujours ce jour-là
+      // qui est en cours / potentiellement incomplet, quel que soit le fuseau
+      // horaire du serveur. Comparer à un "todayKey" calculé côté navigateur
+      // pouvait échouer selon le décalage horaire et laisser passer un jour
+      // non terminé dans la moyenne.
+      const sortedKeys = Object.keys(maxByDay).sort((a, b) => (a < b ? 1 : -1)); // plus récent en premier
+      const completedDays = sortedKeys
+        .slice(1) // on retire le jour le plus récent (en cours)
+        .filter(key => maxByDay[key] > 0)
         .slice(0, days)
-        .map(([, v]) => v);
+        .map(key => maxByDay[key]);
 
       if (completedDays.length) {
         this._rollingAvg = completedDays.reduce((a, b) => a + b, 0) / completedDays.length;
@@ -223,6 +238,17 @@ class ChlorinatorTankCard extends HTMLElement {
 
     const showWarning = c.show_warning_badge && (level === "critical" || level === "empty");
 
+    // ---- Dimensions du réservoir (preset ou valeurs pixel personnalisées) ----
+    const tankPresets = {
+      small: { width: 80, height: 130 },
+      medium: { width: 120, height: 190 },
+      large: { width: 160, height: 250 }
+    };
+    const tankDims = tankPresets[c.tank_size] || { width: c.tank_width, height: c.tank_height };
+
+    // ---- Entité utilisée pour l'historique affiché au clic sur la carte ----
+    const historyEntity = c.history_entity || c.volume_today_entity || c.volume_total_entity;
+
     // ---- Layout du réservoir vs stats ----
     let flexDirection = "row";
     if (c.tank_position === "right") flexDirection = "row-reverse";
@@ -232,12 +258,13 @@ class ChlorinatorTankCard extends HTMLElement {
       <style>
         :host{display:block}
         ha-card{padding:16px;overflow:hidden;
+          ${c.show_history_on_tap && historyEntity ? "cursor:pointer;" : ""}
           ${c.color_card_background ? `background:${c.color_card_background};` : ""}
           ${c.card_border_radius ? `border-radius:${c.card_border_radius};` : ""}}
         .header{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
         .title{font-size:${c.size_title}rem;font-weight:600;color:${c.color_title}}
         .content{display:flex;flex-direction:${flexDirection};gap:18px;align-items:center}
-        .tank-wrap{position:relative;width:${c.tank_width}px;height:${c.tank_height}px;flex-shrink:0;
+        .tank-wrap{position:relative;width:${tankDims.width}px;height:${tankDims.height}px;flex-shrink:0;
           ${c.tank_position === "top" ? "margin:0 auto;" : "margin:auto;"}}
         .tank{position:absolute;inset:10px 12px 8px;border:3px solid ${c.color_tank_border};
           border-radius:18px 18px 12px 12px;overflow:hidden;background:rgba(127,127,127,.08)}
@@ -290,8 +317,14 @@ class ChlorinatorTankCard extends HTMLElement {
       </ha-card>`;
 
     if (c.show_button) {
-      this.shadowRoot.querySelector("#refill")?.addEventListener("click", () => {
+      this.shadowRoot.querySelector("#refill")?.addEventListener("click", (event) => {
+        event.stopPropagation(); // évite de déclencher aussi l'ouverture de l'historique
         if (total === null || !c.refill_baseline_entity) return;
+
+        if (c.confirm_before_refill && !window.confirm(c.confirm_message)) {
+          return;
+        }
+
         const now = new Date();
 
         this._hass.callService("input_number", "set_value", {
@@ -319,6 +352,17 @@ class ChlorinatorTankCard extends HTMLElement {
         this.render();
       });
     }
+
+    if (c.show_history_on_tap && historyEntity) {
+      this.shadowRoot.querySelector("ha-card")?.addEventListener("click", () => {
+        const event = new CustomEvent("hass-more-info", {
+          detail: { entityId: historyEntity },
+          bubbles: true,
+          composed: true
+        });
+        this.dispatchEvent(event);
+      });
+    }
   }
 
   static getConfigForm() {
@@ -336,6 +380,10 @@ class ChlorinatorTankCard extends HTMLElement {
         { name: "volume_yesterday_entity", selector: { entity: {} } },
         { name: "refill_date_entity", selector: { entity: {} } },
         { name: "rolling_average_days", selector: { number: { mode: "box", unit_of_measurement: "j" } } },
+        { name: "confirm_before_refill", selector: { boolean: {} } },
+        { name: "confirm_message", selector: { text: {} } },
+        { name: "show_history_on_tap", selector: { boolean: {} } },
+        { name: "history_entity", selector: { entity: {} } },
 
         { name: "color_card_background", selector: { text: {} } },
         { name: "card_border_radius", selector: { text: {} } },
@@ -359,6 +407,7 @@ class ChlorinatorTankCard extends HTMLElement {
         { name: "size_button", selector: { number: { mode: "box", step: 0.05, unit_of_measurement: "rem" } } },
         { name: "size_icon", selector: { number: { mode: "box", unit_of_measurement: "px" } } },
 
+        { name: "tank_size", selector: { select: { options: ["small", "medium", "large", "custom"] } } },
         { name: "tank_width", selector: { number: { mode: "box", unit_of_measurement: "px" } } },
         { name: "tank_height", selector: { number: { mode: "box", unit_of_measurement: "px" } } },
         { name: "tank_position", selector: { select: { options: ["left", "right", "top"] } } },
