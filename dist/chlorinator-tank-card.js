@@ -170,7 +170,7 @@ class ChlorinatorTankCard extends HTMLElement {
         start_time: start.toISOString(),
         statistic_ids: [entity],
         period: "day",
-        types: ["max"]
+        types: ["max", "state", "sum", "mean"]
       });
 
       if (seq !== this._fetchSeq) {
@@ -179,16 +179,27 @@ class ChlorinatorTankCard extends HTMLElement {
       }
 
       const rows = (stats && stats[entity]) || [];
+      // Selon le state_class du capteur, seul certains champs sont renseignés :
+      // "max" pour un capteur measurement, "state" (dernier relevé de la
+      // période) ou "sum" pour un capteur total/total_increasing. On prend le
+      // premier champ disponible et exploitable.
+      const extract = r => {
+        if (Number.isFinite(r.max)) return r.max;
+        if (Number.isFinite(r.state)) return r.state;
+        if (Number.isFinite(r.sum)) return r.sum;
+        return null;
+      };
       const sorted = rows
-        .filter(r => Number.isFinite(r.max))
+        .map(r => ({ start: r.start, value: extract(r) }))
+        .filter(r => Number.isFinite(r.value))
         .sort((a, b) => new Date(a.start) - new Date(b.start));
 
       // On exclut le dernier point (jour en cours, potentiellement incomplet)
-      usedValues = sorted.slice(0, -1).slice(-days).map(r => r.max);
+      usedValues = sorted.slice(0, -1).slice(-days).map(r => r.value);
 
       console.debug(
         `chlorinator-tank-card: statistiques → ${rows.length} jour(s) reçu(s), ${usedValues.length} retenu(s) pour la moyenne`,
-        usedValues
+        usedValues, rows[0]
       );
     } catch (err) {
       console.warn(
