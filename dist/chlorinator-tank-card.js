@@ -166,7 +166,7 @@ class ChlorinatorTankCard extends HTMLElement {
     // cycles à partir des relevés bruts.
     try {
       const stats = await this._hass.callWS({
-        type: "history/statistics_during_period",
+        type: "recorder/statistics_during_period",
         start_time: start.toISOString(),
         statistic_ids: [entity],
         period: "day",
